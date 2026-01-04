@@ -7,27 +7,36 @@ package database
 
 import (
 	"context"
+
+	"github.com/google/uuid"
 )
 
 const createUser = `-- name: CreateUser :one
-INSERT INTO users (id, created_at, updated_at, email)
+INSERT INTO users (id, created_at, updated_at, email, hashed_password)
 VALUES (
     gen_random_uuid(),
     NOW(),
     NOW(),
-    $1
+    $1,
+    $2
 )
-RETURNING id, email, created_at, updated_at
+RETURNING id, email, created_at, updated_at, hashed_password
 `
 
-func (q *Queries) CreateUser(ctx context.Context, email string) (User, error) {
-	row := q.db.QueryRowContext(ctx, createUser, email)
+type CreateUserParams struct {
+	Email          string `json:"email"`
+	HashedPassword string `json:"hashed_password"`
+}
+
+func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, error) {
+	row := q.db.QueryRowContext(ctx, createUser, arg.Email, arg.HashedPassword)
 	var i User
 	err := row.Scan(
 		&i.ID,
 		&i.Email,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.HashedPassword,
 	)
 	return i, err
 }
@@ -39,4 +48,66 @@ DELETE FROM users
 func (q *Queries) DeleteAllUsers(ctx context.Context) error {
 	_, err := q.db.ExecContext(ctx, deleteAllUsers)
 	return err
+}
+
+const findUserByEmail = `-- name: FindUserByEmail :one
+SELECT id, email, created_at, updated_at, hashed_password FROM users WHERE email=$1
+`
+
+func (q *Queries) FindUserByEmail(ctx context.Context, email string) (User, error) {
+	row := q.db.QueryRowContext(ctx, findUserByEmail, email)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.HashedPassword,
+	)
+	return i, err
+}
+
+const getUserById = `-- name: GetUserById :one
+SELECT id, email, created_at, updated_at, hashed_password FROM users WHERE id=$1
+`
+
+func (q *Queries) GetUserById(ctx context.Context, id uuid.UUID) (User, error) {
+	row := q.db.QueryRowContext(ctx, getUserById, id)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.HashedPassword,
+	)
+	return i, err
+}
+
+const updateUserById = `-- name: UpdateUserById :one
+UPDATE users
+SET hashed_password = $1,
+email = $2,
+updated_at = NOW()
+WHERE id = $3
+RETURNING id, email, created_at, updated_at, hashed_password
+`
+
+type UpdateUserByIdParams struct {
+	HashedPassword string    `json:"hashed_password"`
+	Email          string    `json:"email"`
+	ID             uuid.UUID `json:"id"`
+}
+
+func (q *Queries) UpdateUserById(ctx context.Context, arg UpdateUserByIdParams) (User, error) {
+	row := q.db.QueryRowContext(ctx, updateUserById, arg.HashedPassword, arg.Email, arg.ID)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.HashedPassword,
+	)
+	return i, err
 }
