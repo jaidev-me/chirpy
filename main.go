@@ -24,6 +24,7 @@ type apiConfig struct {
 	db             *database.Queries
 	platform       string
 	jwtSecret      string
+	polkaApiKey    string
 }
 
 const devMode = "dev"
@@ -182,13 +183,37 @@ func (cfg *apiConfig) handlerCreateChirp(w http.ResponseWriter, r *http.Request)
 
 func (cfg *apiConfig) handlerGetChirps(w http.ResponseWriter, r *http.Request) {
 
+	authorId := r.URL.Query().Get("author_id")
+	sortBy := r.URL.Query().Get("sort")
+
+	userId, _ := uuid.Parse(authorId)
+
 	chirps, err := cfg.db.GetAllChirps(r.Context())
 
 	if err != nil {
 		responseWithError(w, "Server Error", 500)
+		return
 	}
 
-	responseWithJson(w, chirps, 200)
+	resChirps := []database.Chirp{}
+
+	if userId != uuid.Nil {
+		for _, chirp := range chirps {
+			if chirp.UserID == userId {
+				resChirps = append(resChirps, chirp)
+			}
+		}
+	} else {
+		resChirps = chirps
+	}
+
+	if sortBy == "desc" {
+		slices.SortFunc(resChirps, func(chirp1, chirp2 database.Chirp) int {
+			return chirp2.CreatedAt.Compare(chirp1.CreatedAt)
+		})
+	}
+
+	responseWithJson(w, resChirps, 200)
 }
 
 func (cfg *apiConfig) handlerGetChirp(w http.ResponseWriter, r *http.Request) {
@@ -222,6 +247,17 @@ func (cfg *apiConfig) handleDeleteChirp(w http.ResponseWriter, r *http.Request) 
 		responseWithError(w, "Invalid chirp id", 400)
 	}
 
+	chirp, err := cfg.db.GetChirpById(r.Context(), id)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			responseWithError(w, "Chirp not found", 404)
+		} else {
+			responseWithError(w, "Server Error", 500)
+		}
+		return
+	}
+
 	accessToken, err := auth.GetBearerToken(r.Header)
 
 	if err != nil {
@@ -236,19 +272,8 @@ func (cfg *apiConfig) handleDeleteChirp(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	chirp, err := cfg.db.GetChirpById(r.Context(), id)
-
 	if chirp.UserID != userId {
-		responseWithError(w, "Unauthorized!", 401)
-		return
-	}
-
-	if err != nil {
-		if err == sql.ErrNoRows {
-			responseWithError(w, "Chirp not found", 404)
-		} else {
-			responseWithError(w, "Server Error", 500)
-		}
+		responseWithError(w, "Unauthorized!", 403)
 		return
 	}
 
@@ -292,15 +317,17 @@ func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, r *http.Request) 
 	}
 
 	userRes := struct {
-		Id        string `json:"id"`
-		Email     string `json:"email"`
-		CreatedAt string `json:"created_at"`
-		UpdatedAt string `json:"updated_at"`
+		Id          string `json:"id"`
+		Email       string `json:"email"`
+		CreatedAt   string `json:"created_at"`
+		UpdatedAt   string `json:"updated_at"`
+		IsChirpyRed bool   `json:"is_chirpy_red"`
 	}{
-		Id:        user.ID.String(),
-		Email:     user.Email,
-		CreatedAt: user.CreatedAt.String(),
-		UpdatedAt: user.UpdatedAt.String(),
+		Id:          user.ID.String(),
+		Email:       user.Email,
+		CreatedAt:   user.CreatedAt.String(),
+		UpdatedAt:   user.UpdatedAt.String(),
+		IsChirpyRed: user.IsChirpyRed,
 	}
 
 	responseWithJson(w, userRes, 201)
@@ -370,11 +397,13 @@ func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt    string `json:"updated_at"`
 		Token        string `json:"token"`
 		RefreshToken string `json:"refresh_token"`
+		IsChirpyRed  bool   `json:"is_chirpy_red"`
 	}{
 		Id:           user.ID.String(),
 		Email:        user.Email,
 		CreatedAt:    user.CreatedAt.String(),
 		UpdatedAt:    user.UpdatedAt.String(),
+		IsChirpyRed:  user.IsChirpyRed,
 		Token:        token,
 		RefreshToken: dbRefToken.Token,
 	}
@@ -504,18 +533,74 @@ func (cfg *apiConfig) handlerUpdateUser(w http.ResponseWriter, r *http.Request) 
 	}
 
 	userRes := struct {
-		Id        string `json:"id"`
-		Email     string `json:"email"`
-		CreatedAt string `json:"created_at"`
-		UpdatedAt string `json:"updated_at"`
+		Id          string `json:"id"`
+		Email       string `json:"email"`
+		CreatedAt   string `json:"created_at"`
+		UpdatedAt   string `json:"updated_at"`
+		IsChirpyRed bool   `json:"is_chirpy_red"`
 	}{
-		Id:        updatedUser.ID.String(),
-		Email:     updatedUser.Email,
-		CreatedAt: updatedUser.CreatedAt.String(),
-		UpdatedAt: updatedUser.UpdatedAt.String(),
+		Id:          updatedUser.ID.String(),
+		Email:       updatedUser.Email,
+		CreatedAt:   updatedUser.CreatedAt.String(),
+		UpdatedAt:   updatedUser.UpdatedAt.String(),
+		IsChirpyRed: updatedUser.IsChirpyRed,
 	}
 
 	responseWithJson(w, userRes, 200)
+}
+
+func (cfg *apiConfig) handlerUpgradeUser(w http.ResponseWriter, r *http.Request) {
+
+	reqKey, err := auth.GetApiKey(r.Header)
+
+	if err != nil || reqKey != cfg.polkaApiKey {
+		responseWithError(w, "Forbidden", 401)
+	}
+
+	incomingData := struct {
+		Even string `json:"event"`
+		Data struct {
+			UserId string `json:"user_id"`
+		} `json:"data"`
+	}{}
+
+	jsonDecoder(w, r, &incomingData)
+
+	if incomingData.Even != "user.upgraded" {
+		responseWithJson(w, struct{}{}, 204)
+		return
+	}
+
+	userId, err := uuid.Parse(incomingData.Data.UserId)
+
+	if err != nil {
+		responseWithError(w, "User Not found", 404)
+		return
+	}
+
+	user, err := cfg.db.GetUserById(r.Context(), userId)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			responseWithError(w, "User Not found", 404)
+		} else {
+			responseWithError(w, "Server error", 500)
+		}
+		return
+	}
+
+	err = cfg.db.UpgradeUserToRed(r.Context(), user.ID)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			responseWithError(w, "User Not found", 404)
+		} else {
+			responseWithError(w, "Server error", 500)
+		}
+		return
+	}
+
+	responseWithJson(w, struct{}{}, 204)
 }
 
 func main() {
@@ -537,6 +622,7 @@ func main() {
 		db:             dbQueries,
 		platform:       os.Getenv("PLATFORM"),
 		jwtSecret:      os.Getenv("JWT_SECRET"),
+		polkaApiKey:    os.Getenv("POLKA_KEY"),
 	}
 
 	mux := http.ServeMux{}
@@ -564,6 +650,8 @@ func main() {
 	mux.HandleFunc("POST /api/refresh", config.handlerRefresh)
 
 	mux.HandleFunc("POST /api/revoke", config.handlerRevoke)
+
+	mux.HandleFunc("POST /api/polka/webhooks", config.handlerUpgradeUser)
 
 	fileServer := http.FileServer(http.Dir("."))
 	mux.Handle("/app/", http.StripPrefix("/app", config.middlewareMetricsInc(fileServer)))
